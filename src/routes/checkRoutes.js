@@ -5,7 +5,8 @@ const {
   getCheck,
   updateCheck,
   deleteCheck,
-  getCheckStats
+  getCheckStats,
+  getCheckResults
 } = require('../controllers/checkController');
 const { protect } = require('../middleware/authMiddleware');
 const {
@@ -20,12 +21,14 @@ const router = express.Router();
 router.use(protect); // All routes are protected (require authentication)
 router.get('/stats', getCheckStats); // Stats route must be defined before /:id to avoid conflict
 
+
 // CRUD routes
 router
   .route('/')
   .get(queryValidation, validate, getChecks)
   .post(createCheckValidation, validate, createCheck);
 
+router.get('/:id/results', getCheckResults);
 router
   .route('/:id')
   .get(getCheck)

@@ -1,13 +1,29 @@
-const Check = require('../models/Check');
-const ErrorResponse = require('../utils/errorResponse');
-const { canCreateCheck, isIntervalAllowed } = require('../utils/checkLimits');
+const Check = require("../models/Check");
+const ErrorResponse = require("../utils/errorResponse");
+const { canCreateCheck, isIntervalAllowed } = require("../utils/checkLimits");
+const {
+  addCheckJob,
+  updateCheckJob,
+  removeCheckJob,
+  pauseCheckJob,
+  resumeCheckJob,
+} = require("../services/queueService");
 
 // @desc    Create new check
 // @route   POST /api/checks
 // @access  Private
 exports.createCheck = async (req, res, next) => {
   try {
-    const { name, url, protocol, method, interval, timeout, expectedStatusCode, tags } = req.body;
+    const {
+      name,
+      url,
+      protocol,
+      method,
+      interval,
+      timeout,
+      expectedStatusCode,
+      tags,
+    } = req.body;
     const userId = req.user.id;
     const userTier = req.user.subscriptionTier;
 
@@ -30,7 +46,9 @@ exports.createCheck = async (req, res, next) => {
     // Task 12: Check for duplicate URL
     const existingCheck = await Check.findOne({ userId, url });
     if (existingCheck) {
-      return next(new ErrorResponse('You are already monitoring this URL', 400));
+      return next(
+        new ErrorResponse("You are already monitoring this URL", 400),
+      );
     }
 
     // Create check
@@ -43,17 +61,27 @@ exports.createCheck = async (req, res, next) => {
       timeout,
       expectedStatusCode,
       tags,
-      userId
+      userId,
     });
+
+    // Task 16: Create BullMQ job for this check
+    try {
+      await addCheckJob(check);
+    } catch (queueError) {
+      console.error("Error creating job:", queueError.message);
+      // Don't fail the request, just log the error
+    }
 
     res.status(201).json({
       success: true,
-      check
+      check,
     });
   } catch (error) {
     // Handle duplicate key error (MongoDB unique index)
     if (error.code === 11000) {
-      return next(new ErrorResponse('You are already monitoring this URL', 400));
+      return next(
+        new ErrorResponse("You are already monitoring this URL", 400),
+      );
     }
     next(error);
   }
@@ -79,25 +107,22 @@ exports.getChecks = async (req, res, next) => {
     }
 
     if (req.query.isActive !== undefined) {
-      filter.isActive = req.query.isActive === 'true';
+      filter.isActive = req.query.isActive === "true";
     }
 
     if (req.query.tags) {
       // Support filtering by multiple tags: ?tags=production,api
-      const tagsArray = req.query.tags.split(',');
+      const tagsArray = req.query.tags.split(",");
       filter.tags = { $in: tagsArray };
     }
 
     // Task 15: Sorting
-    const sortBy = req.query.sortBy || 'createdAt';
-    const sortOrder = req.query.sortOrder === 'asc' ? 1 : -1;
+    const sortBy = req.query.sortBy || "createdAt";
+    const sortOrder = req.query.sortOrder === "asc" ? 1 : -1;
     const sort = { [sortBy]: sortOrder };
 
     // Execute query
-    const checks = await Check.find(filter)
-      .sort(sort)
-      .limit(limit)
-      .skip(skip);
+    const checks = await Check.find(filter).sort(sort).limit(limit).skip(skip);
 
     // Get total count for pagination
     const total = await Check.countDocuments(filter);
@@ -108,10 +133,10 @@ exports.getChecks = async (req, res, next) => {
         page,
         limit,
         total,
-        pages: Math.ceil(total / limit)
+        pages: Math.ceil(total / limit),
       },
       count: checks.length,
-      checks
+      checks,
     });
   } catch (error) {
     next(error);
@@ -126,21 +151,23 @@ exports.getCheck = async (req, res, next) => {
     const check = await Check.findById(req.params.id);
 
     if (!check) {
-      return next(new ErrorResponse('Check not found', 404));
+      return next(new ErrorResponse("Check not found", 404));
     }
 
     // Task 7: Object-level authorization - ensure user owns this check
     if (check.userId.toString() !== req.user.id) {
-      return next(new ErrorResponse('Not authorized to access this check', 403));
+      return next(
+        new ErrorResponse("Not authorized to access this check", 403),
+      );
     }
 
     res.status(200).json({
       success: true,
-      check
+      check,
     });
   } catch (error) {
-    if (error.kind === 'ObjectId') {
-      return next(new ErrorResponse('Check not found', 404));
+    if (error.kind === "ObjectId") {
+      return next(new ErrorResponse("Check not found", 404));
     }
     next(error);
   }
@@ -154,17 +181,22 @@ exports.updateCheck = async (req, res, next) => {
     let check = await Check.findById(req.params.id);
 
     if (!check) {
-      return next(new ErrorResponse('Check not found', 404));
+      return next(new ErrorResponse("Check not found", 404));
     }
 
     // Task 7: Object-level authorization
     if (check.userId.toString() !== req.user.id) {
-      return next(new ErrorResponse('Not authorized to modify this check', 403));
+      return next(
+        new ErrorResponse("Not authorized to modify this check", 403),
+      );
     }
 
     // Check if interval is being updated and validate against tier
     if (req.body.interval) {
-      const intervalCheck = isIntervalAllowed(req.body.interval, req.user.subscriptionTier);
+      const intervalCheck = isIntervalAllowed(
+        req.body.interval,
+        req.user.subscriptionTier,
+      );
       if (!intervalCheck.allowed) {
         return next(new ErrorResponse(intervalCheck.message, 403));
       }
@@ -175,31 +207,46 @@ exports.updateCheck = async (req, res, next) => {
       const existingCheck = await Check.findOne({
         userId: req.user.id,
         url: req.body.url,
-        _id: { $ne: req.params.id }
+        _id: { $ne: req.params.id },
       });
 
       if (existingCheck) {
-        return next(new ErrorResponse('You are already monitoring this URL', 400));
+        return next(
+          new ErrorResponse("You are already monitoring this URL", 400),
+        );
       }
     }
 
     // Update check
-    check = await Check.findByIdAndUpdate(
-      req.params.id,
-      req.body,
-      {
-        new: true,
-        runValidators: true
+    check = await Check.findByIdAndUpdate(req.params.id, req.body, {
+      new: true,
+      runValidators: true,
+    });
+
+    // Task 16: Update job if interval or isActive changed
+    try {
+      if (req.body.interval !== undefined) {
+        // Interval changed, update job
+        await updateCheckJob(check);
+      } else if (req.body.isActive !== undefined) {
+        // Active status changed
+        if (check.isActive) {
+          await resumeCheckJob(check);
+        } else {
+          await pauseCheckJob(check._id);
+        }
       }
-    );
+    } catch (queueError) {
+      console.error("Error updating job:", queueError.message);
+    }
 
     res.status(200).json({
       success: true,
-      check
+      check,
     });
   } catch (error) {
-    if (error.kind === 'ObjectId') {
-      return next(new ErrorResponse('Check not found', 404));
+    if (error.kind === "ObjectId") {
+      return next(new ErrorResponse("Check not found", 404));
     }
     next(error);
   }
@@ -213,24 +260,33 @@ exports.deleteCheck = async (req, res, next) => {
     const check = await Check.findById(req.params.id);
 
     if (!check) {
-      return next(new ErrorResponse('Check not found', 404));
+      return next(new ErrorResponse("Check not found", 404));
     }
 
     // Task 7: Object-level authorization
     if (check.userId.toString() !== req.user.id) {
-      return next(new ErrorResponse('Not authorized to delete this check', 403));
+      return next(
+        new ErrorResponse("Not authorized to delete this check", 403),
+      );
     }
 
     await check.deleteOne();
 
+    // Task 16: Remove job from queue
+    try {
+      await removeCheckJob(check._id);
+    } catch (queueError) {
+      console.error("Error removing job:", queueError.message);
+    }
+
     res.status(200).json({
       success: true,
-      message: 'Check deleted successfully',
-      data: {}
+      message: "Check deleted successfully",
+      data: {},
     });
   } catch (error) {
-    if (error.kind === 'ObjectId') {
-      return next(new ErrorResponse('Check not found', 404));
+    if (error.kind === "ObjectId") {
+      return next(new ErrorResponse("Check not found", 404));
     }
     next(error);
   }
@@ -255,17 +311,17 @@ exports.getCheckStats = async (req, res, next) => {
     // Get status breakdown
     const statusBreakdown = await Check.aggregate([
       { $match: { userId: req.user._id } },
-      { $group: { _id: '$status', count: { $sum: 1 } } }
+      { $group: { _id: "$status", count: { $sum: 1 } } },
     ]);
 
     // Format status breakdown
     const statusCounts = {
       up: 0,
       down: 0,
-      paused: 0
+      paused: 0,
     };
 
-    statusBreakdown.forEach(item => {
+    statusBreakdown.forEach((item) => {
       statusCounts[item._id] = item.count;
     });
 
@@ -275,8 +331,55 @@ exports.getCheckStats = async (req, res, next) => {
         total,
         active,
         paused,
-        statusBreakdown: statusCounts
-      }
+        statusBreakdown: statusCounts,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// @desc    Get check results/history
+// @route   GET /api/checks/:id/results
+// @access  Private
+exports.getCheckResults = async (req, res, next) => {
+  try {
+    const check = await Check.findById(req.params.id);
+
+    if (!check) {
+      return next(new ErrorResponse("Check not found", 404));
+    }
+
+    // Object-level authorization
+    if (check.userId.toString() !== req.user.id) {
+      return next(
+        new ErrorResponse("Not authorized to access this check", 403),
+      );
+    }
+
+    // Pagination
+    const page = parseInt(req.query.page, 10) || 1;
+    const limit = parseInt(req.query.limit, 10) || 20;
+    const skip = (page - 1) * limit;
+
+    // Get results
+    const results = await CheckResult.find({ checkId: req.params.id })
+      .sort({ timestamp: -1 })
+      .limit(limit)
+      .skip(skip);
+
+    const total = await CheckResult.countDocuments({ checkId: req.params.id });
+
+    res.status(200).json({
+      success: true,
+      pagination: {
+        page,
+        limit,
+        total,
+        pages: Math.ceil(total / limit),
+      },
+      count: results.length,
+      results,
     });
   } catch (error) {
     next(error);
