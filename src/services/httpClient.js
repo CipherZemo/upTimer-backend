@@ -1,11 +1,11 @@
 const axios = require('axios');
 
 /**
- * Perform HTTP health check on a URL
+ * Perform a single HTTP check attempt
  * @param {Object} check - Check configuration
- * @returns {Object} - { status, responseTime, statusCode, error }
+ * @returns {Object} - Check result
  */
-const performHealthCheck = async (check) => {
+const performSingleCheck = async (check) => {
   const startTime = Date.now();
   
   try {
@@ -74,6 +74,43 @@ const performHealthCheck = async (check) => {
       responseSize: null
     };
   }
+};
+
+/**
+ * Perform HTTP health check with retry logic
+ * @param {Object} check - Check configuration
+ * @returns {Object} - { status, responseTime, statusCode, error, attempts }
+ */
+const performHealthCheck = async (check) => {
+  const maxAttempts = parseInt(process.env.MAX_RETRY_ATTEMPTS) || 3;
+  const retryDelay = parseInt(process.env.RETRY_DELAY) || 5000; // 5 seconds
+  
+  let lastResult = null;
+  let attempts = 0;
+
+  for (let i = 0; i < maxAttempts; i++) {
+    attempts++;
+    
+    console.log(`   Attempt ${attempts}/${maxAttempts}...`);
+    
+    lastResult = await performSingleCheck(check);
+
+    // If successful, return immediately
+    if (lastResult.status === 'success') {
+      console.log(`   ✅ Success on attempt ${attempts}`);
+      return { ...lastResult, attempts };
+    }
+
+    // If failed and not last attempt, wait before retry
+    if (i < maxAttempts - 1) {
+      console.log(`   ⚠️  Failed, retrying in ${retryDelay/1000}s...`);
+      await new Promise(resolve => setTimeout(resolve, retryDelay));
+    }
+  }
+
+  // All attempts failed
+  console.log(`   ❌ All ${attempts} attempts failed`);
+  return { ...lastResult, attempts };
 };
 
 module.exports = {
