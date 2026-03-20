@@ -1,7 +1,84 @@
-const Check = require('../../models/Check');
-const CheckResult = require('../../models/CheckResult');
-const { performHealthCheck } = require('../services/httpClient');
-const { calculateUptime } = require('../services/uptimeCalculator');
+const Check = require("../../models/Check");
+const CheckResult = require("../../models/CheckResult");
+const Incident = require("../../models/Incident");
+const User = require("../../models/User");
+const { performHealthCheck } = require("../services/httpClient");
+const { calculateUptime } = require("../services/uptimeCalculator");
+const {
+  sendDownAlerts,
+  sendRecoveryAlerts,
+} = require("../../services/alertManager");
+
+/**
+ * Create a new incident when check goes down
+ */
+const createIncident = async (check, result, user) => {
+  try {
+    const incident = await Incident.create({
+      checkId: check._id,
+      userId: check.userId,
+      status: "open",
+      startedAt: new Date(),
+      failureReason: result.errorMessage,
+      errorType: result.errorType,
+      downAlertSent: false,
+      recoveryAlertSent: false,
+    });
+
+    console.log(`   🚨 Incident created: ${incident._id}`);
+
+    // Send alerts (email + webhook) via Alert Manager
+    const alertResults = await sendDownAlerts(user, check, incident);
+
+    // Update incident with alert status
+    incident.downAlertSent =
+      alertResults.email.sent || alertResults.webhook.sent;
+    await incident.save();
+
+    return incident;
+  } catch (error) {
+    console.error(`   ❌ Error creating incident:`, error.message);
+    return null;
+  }
+};
+
+/**
+ * Resolve an open incident when check recovers
+ */
+const resolveIncident = async (check, user) => {
+  try {
+    // Find the most recent open incident for this check
+    const incident = await Incident.findOne({
+      checkId: check._id,
+      status: "open",
+    }).sort({ startedAt: -1 });
+
+    if (!incident) {
+      console.log(`   ℹ️  No open incident found to resolve`);
+      return null;
+    }
+
+    // Resolve the incident
+    await incident.resolve();
+
+    console.log(
+      `   ✅ Incident resolved: ${incident._id} (Duration: ${incident.duration} min)`,
+    );
+
+    // Send alerts (email + webhook) via Alert Manager
+    const alertResults = await sendRecoveryAlerts(user, check, incident);
+
+    // Update incident with alert status
+    incident.recoveryAlertSent =
+      alertResults.email.sent || alertResults.webhook.sent;
+    await incident.save();
+
+    return incident;
+  } catch (error) {
+    console.error(`   ❌ Error resolving incident:`, error.message);
+    return null;
+  }
+};
 
 /**
  * Process a health check job
@@ -9,7 +86,7 @@ const { calculateUptime } = require('../services/uptimeCalculator');
  */
 const processCheck = async (job) => {
   const { checkId } = job.data;
-  
+
   console.log(`\n🔍 Processing check ID: ${checkId}`);
 
   try {
@@ -18,7 +95,7 @@ const processCheck = async (job) => {
 
     if (!check) {
       console.error(`❌ Check not found: ${checkId}`);
-      return { success: false, error: 'Check not found' };
+      return { success: false, error: "Check not found" };
     }
 
     // Skip if check is not active
@@ -27,12 +104,21 @@ const processCheck = async (job) => {
       return { success: true, skipped: true };
     }
 
+    // Get user for alert preferences
+    const user = await User.findById(check.userId);
+    if (!user) {
+      console.error(`❌ User not found: ${check.userId}`);
+      return { success: false, error: "User not found" };
+    }
+
     console.log(`📡 Checking: ${check.name} (${check.url})`);
 
-    // Perform health check
+    // Perform health check (with retry logic)
     const result = await performHealthCheck(check);
 
-    console.log(`📊 Result: ${result.status} | ${result.responseTime}ms | Status: ${result.statusCode || 'N/A'}`);
+    console.log(
+      `📊 Result: ${result.status} | ${result.responseTime}ms | Status: ${result.statusCode || "N/A"} | Attempts: ${result.attempts}`,
+    );
 
     // Save check result
     const checkResult = await CheckResult.create({
@@ -45,12 +131,12 @@ const processCheck = async (job) => {
       timestamp: new Date(),
       checkedAt: new Date(),
       responseHeaders: result.responseHeaders,
-      responseSize: result.responseSize
+      responseSize: result.responseSize,
     });
 
-    // Update check status
+    // Determine new status
     const previousStatus = check.status;
-    const newStatus = result.status === 'success' ? 'up' : 'down';
+    const newStatus = result.status === "success" ? "up" : "down";
 
     // Calculate uptime (last 24 hours)
     const uptime = await calculateUptime(check._id, 24);
@@ -59,13 +145,22 @@ const processCheck = async (job) => {
     await Check.findByIdAndUpdate(check._id, {
       status: newStatus,
       lastCheckedAt: new Date(),
-      uptime: uptime
+      uptime: uptime,
     });
 
-    // Log status change
+    // Handle status changes and incidents
     if (previousStatus !== newStatus) {
-      console.log(`🚨 Status changed: ${check.name} is now ${newStatus.toUpperCase()}`);
-      // TODO: Trigger alert (Step 5/6)
+      console.log(
+        `🚨 Status changed: ${check.name} is now ${newStatus.toUpperCase()}`,
+      );
+
+      if (newStatus === "down") {
+        // Check went down - create incident and send alerts
+        await createIncident(check, result, user);
+      } else if (newStatus === "up") {
+        // Check recovered - resolve incident and send alerts
+        await resolveIncident(check, user);
+      }
     }
 
     console.log(`✅ Check complete: ${check.name} | Uptime: ${uptime}%`);
@@ -76,25 +171,25 @@ const processCheck = async (job) => {
       checkName: check.name,
       status: newStatus,
       responseTime: result.responseTime,
-      uptime
+      uptime,
+      attempts: result.attempts,
     };
-
   } catch (error) {
     console.error(`❌ Error processing check ${checkId}:`, error.message);
-    
+
     // Save failed result
     try {
       await CheckResult.create({
         checkId,
-        status: 'failure',
+        status: "failure",
         responseTime: 0,
         errorMessage: error.message,
-        errorType: 'unknown',
+        errorType: "unknown",
         timestamp: new Date(),
-        checkedAt: new Date()
+        checkedAt: new Date(),
       });
     } catch (saveError) {
-      console.error('❌ Error saving failed result:', saveError.message);
+      console.error("❌ Error saving failed result:", saveError.message);
     }
 
     throw error; // Let BullMQ handle retry
@@ -102,5 +197,5 @@ const processCheck = async (job) => {
 };
 
 module.exports = {
-  processCheck
+  processCheck,
 };

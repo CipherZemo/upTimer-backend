@@ -385,3 +385,97 @@ exports.getCheckResults = async (req, res, next) => {
     next(error);
   }
 };
+
+// @desc    Get incidents for a check
+// @route   GET /api/checks/:id/incidents
+// @access  Private
+exports.getCheckIncidents = async (req, res, next) => {
+  try {
+    const check = await Check.findById(req.params.id);
+
+    if (!check) {
+      return next(new ErrorResponse('Check not found', 404));
+    }
+
+    // Object-level authorization
+    if (check.userId.toString() !== req.user.id) {
+      return next(new ErrorResponse('Not authorized to access this check', 403));
+    }
+
+    // Pagination
+    const page = parseInt(req.query.page, 10) || 1;
+    const limit = parseInt(req.query.limit, 10) || 20;
+    const skip = (page - 1) * limit;
+
+    // Filter by status if provided
+    const filter = { checkId: req.params.id };
+    if (req.query.status) {
+      filter.status = req.query.status;
+    }
+
+    // Get incidents
+    const incidents = await Incident.find(filter)
+      .sort({ startedAt: -1 })
+      .limit(limit)
+      .skip(skip);
+
+    const total = await Incident.countDocuments(filter);
+
+    res.status(200).json({
+      success: true,
+      pagination: {
+        page,
+        limit,
+        total,
+        pages: Math.ceil(total / limit)
+      },
+      count: incidents.length,
+      incidents
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+// @desc    Get all incidents for user
+// @route   GET /api/incidents
+// @access  Private
+exports.getAllIncidents = async (req, res, next) => {
+  try {
+    const userId = req.user.id;
+
+    // Pagination
+    const page = parseInt(req.query.page, 10) || 1;
+    const limit = parseInt(req.query.limit, 10) || 20;
+    const skip = (page - 1) * limit;
+
+    // Filter
+    const filter = { userId };
+    if (req.query.status) {
+      filter.status = req.query.status;
+    }
+
+    // Get incidents with check details
+    const incidents = await Incident.find(filter)
+      .populate('checkId', 'name url')
+      .sort({ startedAt: -1 })
+      .limit(limit)
+      .skip(skip);
+
+    const total = await Incident.countDocuments(filter);
+
+    res.status(200).json({
+      success: true,
+      pagination: {
+        page,
+        limit,
+        total,
+        pages: Math.ceil(total / limit)
+      },
+      count: incidents.length,
+      incidents
+    });
+  } catch (error) {
+    next(error);
+  }
+};
