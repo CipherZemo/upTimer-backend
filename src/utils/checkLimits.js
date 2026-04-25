@@ -75,6 +75,38 @@ const isIntervalAllowed = (interval, tier) => {
   };
 };
 
+const Subscription = require('../models/Subscription');
+const { SUBSCRIPTION_PLANS } = require('../config/razorpay');
+
+async function canCreateCheck(userId, currentCheckCount) {
+  const subscription = await Subscription.findOne({ userId }).select('plan');
+  const tier = subscription?.plan || 'free';
+  const limits = SUBSCRIPTION_PLANS[tier].features;
+
+  if (limits.maxChecks === -1) {
+    return { allowed: true };
+  }
+
+  if (currentCheckCount >= limits.maxChecks) {
+    return {
+      allowed: false,
+      message: `You've reached the maximum of ${limits.maxChecks} checks for the ${tier} plan.`,
+      limit: limits.maxChecks,
+    };
+  }
+
+  return { allowed: true };
+}
+
+function getMinInterval(tier) {
+  return SUBSCRIPTION_PLANS[tier]?.features.minInterval || 5;
+}
+
+module.exports = {
+  canCreateCheck,
+  getMinInterval,
+};
+
 module.exports = {
   TIER_LIMITS,
   getTierLimit,
